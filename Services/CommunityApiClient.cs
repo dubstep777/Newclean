@@ -1,132 +1,340 @@
+using System;
+using System.Collections.Generic;
 using System.Net;
-using System.Net.Http.Headers;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using XUnlock.Models;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace XUnlock.Services;
+namespace XUnlock;
 
-public sealed class CommunityApiClient : IDisposable
+public sealed class CommunityApiClient : ICommunityApi
 {
-    private const string StateEndpoint = "https://sgp-api.buy.mi.com/bbs/api/global/user/bl-switch/state";
-    private const string ApplyEndpoint = "https://sgp-api.buy.mi.com/bbs/api/global/apply/bl-auth";
-    private readonly HttpClient _http;
-    private readonly Logger _log;
-    private readonly object _sync = new();
-    private string _cookie = string.Empty;
-    private bool _disposed;
+    private const string StateUrl =
+        "https://sgp-api.buy.mi.com/bbs/api/global/user/bl-switch/state";
 
-    public CommunityApiClient(Logger log, HttpMessageHandler? handler = null)
+    private const string ApplyUrl =
+        "https://sgp-api.buy.mi.com/bbs/api/global/apply/bl-auth";
+
+    private readonly HttpClient _httpClient;
+    private readonly Logger _logger;
+
+    public CommunityApiClient(
+        HttpClient? httpClient = null,
+        Logger? logger = null)
     {
-        _log = log;
-        handler ??= new SocketsHttpHandler
+        _httpClient = httpClient ?? CreateHttpClient();
+        _logger = logger ?? new Logger();
+    }
+
+    public async Task<ApiStateResult> GetStateAsync(
+        SessionData session,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        var request = CreateRequest(
+            HttpMethod.Get,
+            StateUrl,
+            session);
+
+        var started = DateTimeOffset.UtcNow;
+
+        try
         {
-            AutomaticDecompression = DecompressionMethods.All,
-            PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            ConnectTimeout = TimeSpan.FromSeconds(8),
-            UseCookies = false
+            using var response = await _httpClient
+                .SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var elapsed = DateTimeOffset.UtcNow - started;
+            var body = await response.Content
+                .ReadAsStringAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            _logger.Info(
+                $"STATE HTTP={(int)response.StatusCode} RTT={elapsed.TotalMilliseconds:F0}ms");
+
+            return ParseStateResponse(
+                response.StatusCode,
+                response.Headers.Date,
+                body);
+        }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"STATE request failed: {ex.Message}");
+
+            return new ApiStateResult
+            {
+                Code = -1,
+                Message = ex.Message,
+                HttpStatus = null,
+                ServerDate = null
+            };
+        }
+    }
+
+    public async Task<ApiApplyResult> ApplyAsync(
+        SessionData session,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        var request = CreateRequest(
+            HttpMethod.Post,
+            ApplyUrl,
+            session);
+
+        request.Content = new StringContent(
+            "{\"is_retry\":true}",
+            Encoding.UTF8,
+            "application/json");
+
+        var started = DateTimeOffset.UtcNow;
+
+        try
+        {
+            using var response = await _httpClient
+                .SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            var elapsed = DateTimeOffset.UtcNow - started;
+            var body = await response.Content
+                .ReadAsStringAsync(cancellationToken)
+                .ConfigureAwait(false);
+
+            _logger.Info(
+                $"APPLY HTTP={(int)response.StatusCode} RTT={elapsed.TotalMilliseconds:F0}ms");
+
+            return ParseApplyResponse(
+                response.StatusCode,
+                response.Headers.Date,
+                body);
+        }
+        catch (OperationCanceledException) when (
+            cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.Error($"APPLY request failed: {ex.Message}");
+
+            return new ApiApplyResult
+            {
+                Code = -1,
+                Message = ex.Message,
+                HttpStatus = null,
+                ServerDate = null
+            };
+        }
+    }
+
+    private static HttpClient CreateHttpClient()
+    {
+        var handler = new HttpClientHandler
+        {
+            AutomaticDecompression =
+                DecompressionMethods.GZip |
+                DecompressionMethods.Deflate |
+                DecompressionMethods.Brotli
         };
-        _http = new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(12) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("okhttp/4.12.0");
-        _http.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        return new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(20)
+        };
     }
 
-    public void SetSession(SessionSnapshot session)
+    private static HttpRequestMessage CreateRequest(
+        HttpMethod method,
+        string url,
+        SessionData session)
     {
-        lock (_sync) _cookie = session.CookieHeader;
-        _log.Info($"API session set authenticated={session.IsAuthenticated} cookies={session.CookieCount}");
+        var request = new HttpRequestMessage(method, url);
+
+        request.Headers.TryAddWithoutValidation(
+            "User-Agent",
+            "okhttp/4.12.0");
+
+        request.Headers.TryAddWithoutValidation(
+            "Accept",
+            "application/json");
+
+        request.Headers.TryAddWithoutValidation(
+            "versionCode",
+            session.VersionCode ?? "500");
+
+        request.Headers.TryAddWithoutValidation(
+            "versionName",
+            session.VersionName ?? "5.0.0");
+
+        request.Headers.TryAddWithoutValidation(
+            "deviceId",
+            session.DeviceId ?? string.Empty);
+
+        if (!string.IsNullOrWhiteSpace(session.ServiceToken))
+        {
+            request.Headers.TryAddWithoutValidation(
+                "Cookie",
+                BuildCookie(session));
+        }
+
+        return request;
     }
 
-    public async Task<ApiStateResult> GetStateAsync(CancellationToken ct)
+    private static string BuildCookie(SessionData session)
     {
-        EnsureNotDisposed();
-        using var request = CreateRequest(HttpMethod.Get, StateEndpoint);
-        return await SendStateAsync(request, ct);
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(session.ServiceToken))
+        {
+            parts.Add(
+                $"new_bbs_serviceToken={session.ServiceToken}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.VersionCode))
+        {
+            parts.Add(
+                $"versionCode={session.VersionCode}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.VersionName))
+        {
+            parts.Add(
+                $"versionName={session.VersionName}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.DeviceId))
+        {
+            parts.Add(
+                $"deviceId={session.DeviceId}");
+        }
+
+        return string.Join(";", parts) + ";";
     }
 
-    public async Task<ApplyResult> ApplyAsync(CancellationToken ct)
+    private static ApiStateResult ParseStateResponse(
+        HttpStatusCode statusCode,
+        DateTimeOffset? serverDate,
+        string body)
     {
-        EnsureNotDisposed();
-        using var request = CreateRequest(HttpMethod.Post, ApplyEndpoint);
-        request.Content = new StringContent("{\"is_retry\":true}", Encoding.UTF8, "application/json");
-        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            sw.Stop();
-            var body = await response.Content.ReadAsStringAsync(ct);
-            var date = response.Headers.Date;
-            _log.Info($"APPLY http={(int)response.StatusCode} rtt={sw.ElapsedMilliseconds}ms bytes={body.Length}");
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                return new(ApplyState.AuthenticationRequired, (int)response.StatusCode, "Сессия Xiaomi недействительна", sw.Elapsed, date, "http-auth");
-            if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
-                return new(ApplyState.TemporaryError, (int)response.StatusCode, "Временная HTTP ошибка", sw.Elapsed, date, "http-temporary");
-            if (!response.IsSuccessStatusCode)
-                return new(ApplyState.ApiChanged, (int)response.StatusCode, $"HTTP {(int)response.StatusCode}", sw.Elapsed, date, "http-error");
-            return ApiResponseParser.ParseApply(body, sw.Elapsed, date);
+            using var document =
+                JsonDocument.Parse(body);
+
+            var root = document.RootElement;
+
+            var code = ReadInt(root, "code", -1);
+            var message = ReadString(root, "message")
+                          ?? ReadString(root, "msg")
+                          ?? string.Empty;
+
+            return new ApiStateResult
+            {
+                Code = code,
+                Message = message,
+                HttpStatus = (int)statusCode,
+                ServerDate = serverDate,
+                RawBody = body
+            };
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex)
+        catch (JsonException)
         {
-            sw.Stop(); _log.Error("APPLY transport failure", ex);
-            return new(ApplyState.TemporaryError, null, ex.Message, sw.Elapsed, null, "transport-error");
+            return new ApiStateResult
+            {
+                Code = -1,
+                Message = "Invalid JSON response.",
+                HttpStatus = (int)statusCode,
+                ServerDate = serverDate,
+                RawBody = body
+            };
         }
     }
 
-    private async Task<ApiStateResult> SendStateAsync(HttpRequestMessage request, CancellationToken ct)
+    private static ApiApplyResult ParseApplyResponse(
+        HttpStatusCode statusCode,
+        DateTimeOffset? serverDate,
+        string body)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            sw.Stop();
-            var body = await response.Content.ReadAsStringAsync(ct);
-            var date = response.Headers.Date;
-            _log.Info($"STATE http={(int)response.StatusCode} rtt={sw.ElapsedMilliseconds}ms bytes={body.Length}");
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
-                return new(PermissionState.AuthenticationRequired, (int)response.StatusCode, "Сессия Xiaomi недействительна", sw.Elapsed, date, "http-auth");
-            if ((int)response.StatusCode == 429 || (int)response.StatusCode >= 500)
-                return new(PermissionState.TemporaryError, (int)response.StatusCode, "Временная HTTP ошибка", sw.Elapsed, date, "http-temporary");
-            if (!response.IsSuccessStatusCode)
-                return new(PermissionState.ApiChanged, (int)response.StatusCode, $"HTTP {(int)response.StatusCode}", sw.Elapsed, date, "http-error");
-            return ApiResponseParser.ParseState(body, sw.Elapsed, date);
+            using var document =
+                JsonDocument.Parse(body);
+
+            var root = document.RootElement;
+
+            var code = ReadInt(root, "code", -1);
+            var message = ReadString(root, "message")
+                          ?? ReadString(root, "msg")
+                          ?? string.Empty;
+
+            return new ApiApplyResult
+            {
+                Code = code,
+                Message = message,
+                HttpStatus = (int)statusCode,
+                ServerDate = serverDate,
+                RawBody = body
+            };
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-        catch (Exception ex)
+        catch (JsonException)
         {
-            sw.Stop(); _log.Error("STATE transport failure", ex);
-            return new(PermissionState.TemporaryError, null, ex.Message, sw.Elapsed, null, "transport-error");
+            return new ApiApplyResult
+            {
+                Code = -1,
+                Message = "Invalid JSON response.",
+                HttpStatus = (int)statusCode,
+                ServerDate = serverDate,
+                RawBody = body
+            };
         }
     }
 
-    private HttpRequestMessage CreateRequest(HttpMethod method, string url)
+    private static int ReadInt(
+        JsonElement root,
+        string property,
+        int fallback)
     {
-        var req = new HttpRequestMessage(method, url);
-        string cookie;
-        lock (_sync) cookie = _cookie;
-        if (!string.IsNullOrWhiteSpace(cookie)) req.Headers.TryAddWithoutValidation("Cookie", cookie);
-        req.Headers.TryAddWithoutValidation("versionCode", "50001");
-        req.Headers.TryAddWithoutValidation("versionName", "5.0.1");
-        req.Headers.TryAddWithoutValidation("deviceId", DeviceIdProvider.GetStableId());
-        return req;
+        if (!root.TryGetProperty(property, out var value))
+            return fallback;
+
+        if (value.ValueKind == JsonValueKind.Number &&
+            value.TryGetInt32(out var number))
+        {
+            return number;
+        }
+
+        if (value.ValueKind == JsonValueKind.String &&
+            int.TryParse(value.GetString(), out number))
+        {
+            return number;
+        }
+
+        return fallback;
     }
 
-    private void EnsureNotDisposed() { if (_disposed) throw new ObjectDisposedException(nameof(CommunityApiClient)); }
-    public void Dispose() { if (_disposed) return; _disposed = true; _http.Dispose(); }
-}
-
-internal static class DeviceIdProvider
-{
-    private static readonly string Id = Create();
-    public static string GetStableId() => Id;
-    private static string Create()
+    private static string? ReadString(
+        JsonElement root,
+        string property)
     {
-        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "X-Unlock");
-        Directory.CreateDirectory(dir);
-        var file = Path.Combine(dir, "device.id");
-        if (File.Exists(file)) return File.ReadAllText(file).Trim();
-        var id = Guid.NewGuid().ToString("N");
-        File.WriteAllText(file, id);
-        return id;
+        if (!root.TryGetProperty(property, out var value))
+            return null;
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : value.ToString();
     }
 }
