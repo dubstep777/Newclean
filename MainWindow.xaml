@@ -1,0 +1,43 @@
+<Window x:Class="XUnlock.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="X-Unlock — clean build" Height="760" Width="1120" MinHeight="600" MinWidth="900">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*"/>
+            <RowDefinition Height="3*"/>
+        </Grid.RowDefinitions>
+        <DockPanel Grid.Row="0" LastChildFill="True">
+            <TextBlock Text="X-Unlock" FontSize="24" FontWeight="Bold" DockPanel.Dock="Left"/>
+            <TextBlock x:Name="RunState" Text="STOPPED" HorizontalAlignment="Right" FontWeight="Bold"/>
+        </DockPanel>
+        <UniformGrid Grid.Row="1" Columns="4" Margin="0,12,0,12">
+            <GroupBox Header="ACCOUNT" Margin="4"><TextBlock x:Name="AccountText" Text="Not checked" Padding="8"/></GroupBox>
+            <GroupBox Header="PERMISSION" Margin="4"><TextBlock x:Name="PermissionText" Text="Unknown" Padding="8"/></GroupBox>
+            <GroupBox Header="TIMING" Margin="4"><TextBlock x:Name="TimingText" Text="RTT 0 ms · p90 0 · offset 0 ms" Padding="8"/></GroupBox>
+            <GroupBox Header="STATUS" Margin="4"><TextBlock x:Name="StatusText" Text="Ready" Padding="8" TextWrapping="Wrap"/></GroupBox>
+        </UniformGrid>
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal">
+                <Button x:Name="LoginButton" Content="Открыть Xiaomi Community" Click="LoginButton_Click"/>
+                <Button x:Name="SessionButton" Content="Проверить сессию" Click="SessionButton_Click"/>
+                <Button x:Name="StartButton" Content="START MONITOR" Click="StartButton_Click"/>
+                <Button x:Name="StopButton" Content="STOP" Click="StopButton_Click" IsEnabled="False"/>
+            </StackPanel>
+            <TextBlock Grid.Column="1" Text="CAPTCHA/2FA — только вручную" VerticalAlignment="Center" Margin="12"/>
+        </Grid>
+        <Grid Grid.Row="3" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="1.7*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <GroupBox Header="Официальная страница Xiaomi Community">
+                <wv2:WebView2 x:Name="Browser" NavigationCompleted="Browser_NavigationCompleted"/>
+            </GroupBox>
+            <GroupBox Grid.Column="1" Header="Диагностика">
+                <TextBox x:Name="Diagnostics" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </GroupBox>
+        </Grid>
+    </Grid>
+</Window>
